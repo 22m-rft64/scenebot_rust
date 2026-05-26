@@ -41,14 +41,14 @@ pipeline {
         stage('Migrate (irem)') {
             when { branch 'main' }
             steps {
-                withCredentials([
-                    string(credentialsId: 'irem-discord-bot-token', variable: 'TOKEN'),
-                    string(credentialsId: 'mongodb-uri',            variable: 'DB_URI')
-                ]) {
+                withCredentials([file(credentialsId: 'scenebot-env', variable: 'ENVFILE')]) {
                     sh '''
+                        set -a
+                        . "$ENVFILE"
+                        set +a
                         docker run --rm \
                             --network shared-mongodb-net \
-                            -e DISCORD_BOT_TOKEN="$TOKEN" \
+                            -e DISCORD_BOT_TOKEN="$IREM_DISCORD_BOT_TOKEN" \
                             -e DB_URI="$DB_URI" \
                             -e BOT_DB_NAME=trainingsuit_mari_guilds \
                             -e RUST_LOG=info \
@@ -62,14 +62,14 @@ pipeline {
         stage('Migrate (scene)') {
             when { branch 'main' }
             steps {
-                withCredentials([
-                    string(credentialsId: 'scene-discord-bot-token', variable: 'TOKEN'),
-                    string(credentialsId: 'mongodb-uri',             variable: 'DB_URI')
-                ]) {
+                withCredentials([file(credentialsId: 'scenebot-env', variable: 'ENVFILE')]) {
                     sh '''
+                        set -a
+                        . "$ENVFILE"
+                        set +a
                         docker run --rm \
                             --network shared-mongodb-net \
-                            -e DISCORD_BOT_TOKEN="$TOKEN" \
+                            -e DISCORD_BOT_TOKEN="$SCENE_DISCORD_BOT_TOKEN" \
                             -e DB_URI="$DB_URI" \
                             -e BOT_DB_NAME=scene_guilds \
                             -e RUST_LOG=info \
@@ -83,14 +83,10 @@ pipeline {
         stage('Deploy') {
             when { branch 'main' }
             steps {
-                withCredentials([
-                    string(credentialsId: 'irem-discord-bot-token',  variable: 'IREM_DISCORD_BOT_TOKEN'),
-                    string(credentialsId: 'scene-discord-bot-token', variable: 'SCENE_DISCORD_BOT_TOKEN'),
-                    string(credentialsId: 'mongodb-uri',             variable: 'DB_URI')
-                ]) {
+                withCredentials([file(credentialsId: 'scenebot-env', variable: 'ENVFILE')]) {
                     sh '''
-                        docker compose down --remove-orphans || true
-                        docker compose up -d
+                        docker compose --env-file "$ENVFILE" down --remove-orphans || true
+                        docker compose --env-file "$ENVFILE" up -d
                     '''
                 }
             }
@@ -99,7 +95,6 @@ pipeline {
 
     post {
         always {
-            // dangling 이미지 정리. labels=scenebot=true는 다음 빌드에서 prune 대상.
             sh 'docker image prune -f --filter "until=168h" || true'
         }
     }
