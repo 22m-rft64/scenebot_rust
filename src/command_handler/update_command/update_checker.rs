@@ -10,14 +10,12 @@ pub enum UpdateStatus {
     FailedtoLoad,
 }
 
-//Version을 파라미터로 업데이트하게끔 변경
 pub async fn check_updates(ctx: &Context, gid: GuildId) -> UpdateStatus {
     match gid.get_commands(&ctx.http).await {
         Ok(cmds) => {
             let mut guild_cmds_list = cmds
-                .clone()
-                .into_iter()
-                .map(|v| v.name)
+                .iter()
+                .map(|v| v.name.clone())
                 .collect::<Vec<String>>();
             let mut server_cmds_list = Vec::new();
             for scmds in COMMAND_LIST.commands.values() {
@@ -28,22 +26,19 @@ pub async fn check_updates(ctx: &Context, gid: GuildId) -> UpdateStatus {
             guild_cmds_list.sort();
             server_cmds_list.sort();
 
-            return if cmds.len() == 1 {
+            if guild_cmds_list == vec!["update".to_string()] {
                 UpdateStatus::FirstSetting
-            //개수로 판단하는거는 문제가 있음. 기존꺼 삭제하고 하나 추가하면..
             } else if guild_cmds_list == server_cmds_list {
                 UpdateStatus::LatestVersion
             } else {
-                //아직 등록되지 않은 명령어 목록을 parameter로 전달
                 let mut unassigned_commands = Vec::new();
-                let cmdname_lists = cmds.iter().map(|c| c.name.clone()).collect::<Vec<String>>();
-                for (cmdname, _) in COMMAND_LIST.commands.iter() {
-                    if !cmdname_lists.contains(&cmdname.to_string()) {
+                for cmdname in COMMAND_LIST.commands.keys() {
+                    if !guild_cmds_list.contains(&cmdname.to_string()) {
                         unassigned_commands.push(cmdname.to_string());
                     }
                 }
                 UpdateStatus::UpdateAvailable(unassigned_commands)
-            };
+            }
         }
         Err(why) => {
             error!(

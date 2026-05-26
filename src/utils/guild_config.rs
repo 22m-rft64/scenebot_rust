@@ -1,7 +1,7 @@
 use crate::{utils::scene_core::ImageSize, GlobalGuildConfigs};
-use log::{error, info};
+use log::{error, info, warn};
 
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Bson};
 use serde::{Deserialize, Serialize};
 use serenity::{
     all::Permissions, builder::CreateCommand, client::Context, gateway::ActivityData,
@@ -9,24 +9,19 @@ use serenity::{
 };
 use std::num::NonZeroU64;
 
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GuildConfig {
     pub guild_id: NonZeroU64,
     pub auto_magnitute_enable: bool,
     pub auto_magnitute_config: ImageSize,
-    pub auto_transfer_webp: bool,
 }
 
 impl GuildConfig {
     pub fn new(guild: &GuildId) -> Self {
         Self {
-            guild_id: NonZeroU64::new(guild.get()).unwrap(),
+            guild_id: NonZeroU64::new(guild.get()).expect("guild id cannot be zero"),
             auto_magnitute_enable: false,
             auto_magnitute_config: ImageSize::Auto,
-            auto_transfer_webp: false,
         }
     }
 
@@ -34,27 +29,31 @@ impl GuildConfig {
         guild: &GuildId,
         auto_magnitute_enable_input: bool,
         auto_magnitute_config_input: ImageSize,
-        auto_transfer_webp_input: bool,
     ) -> Self {
         Self {
-            guild_id: NonZeroU64::new(guild.get()).unwrap(),
+            guild_id: NonZeroU64::new(guild.get()).expect("guild id cannot be zero"),
             auto_magnitute_enable: auto_magnitute_enable_input,
             auto_magnitute_config: auto_magnitute_config_input,
-            auto_transfer_webp: auto_transfer_webp_input,
         }
     }
 
     pub async fn delete(guild: &GuildId, ctx: &Context) -> Result<(), ()> {
         let counter_lock = {
             let data_read = ctx.data.read().await;
-            data_read
-                .get::<GlobalGuildConfigs>()
-                .expect("poisened")
-                .clone()
+            match data_read.get::<GlobalGuildConfigs>() {
+                Some(c) => c.clone(),
+                None => {
+                    error!("GlobalGuildConfigs not initialised");
+                    return Err(());
+                }
+            }
         };
         let mut guilds_config = counter_lock.write().await;
-        match guilds_config.remove(&NonZeroU64::new(guild.get()).unwrap()) {
-            Some(_) => Ok(()),
+        match NonZeroU64::new(guild.get()) {
+            Some(key) => match guilds_config.remove(&key) {
+                Some(_) => Ok(()),
+                None => Err(()),
+            },
             None => Err(()),
         }
     }
@@ -65,19 +64,25 @@ impl GuildConfig {
             ctx.cache.guilds().len()
         );
 
-        let collections: Arc<Mutex<mongodb::Collection<bson::document::Document>>> =
-            Arc::new(Mutex::new(
-                database
-                    .database("scene")
-                    .collection(std::env::var("BOT_DB_NAME").unwrap().as_str()),
-            ));
+        let db_name = match std::env::var("BOT_DB_NAME") {
+            Ok(v) => v,
+            Err(e) => {
+                error!("BOT_DB_NAME not set: {:?}", e);
+                return;
+            }
+        };
+        let collections: mongodb::Collection<bson::document::Document> =
+            database.database("scene").collection(&db_name);
 
         let counter_lock = {
             let data_read = ctx.data.read().await;
-            data_read
-                .get::<GlobalGuildConfigs>()
-                .expect("poisened")
-                .clone()
+            match data_read.get::<GlobalGuildConfigs>() {
+                Some(c) => c.clone(),
+                None => {
+                    error!("GlobalGuildConfigs not initialised");
+                    return;
+                }
+            }
         };
         ctx.set_activity(Some(ActivityData::playing("부팅")));
 
@@ -99,67 +104,142 @@ impl GuildConfig {
                 );
             }
             tokio::spawn(async move {
-                info!("loading guild {}..", NonZeroU64::new(guild.get()).unwrap());
+                let Some(key) = NonZeroU64::new(guild.get()) else {
+                    error!("guild id is zero: {:?}", guild);
+                    return;
+                };
+                info!("loading guild {}..", key);
 
-                let collections = sync_collections.lock().await;
-                let mut guilds_config = sync_guilds_config.write().await;
-                let find_result = collections
-                    .find_one(
-                        doc! {
-                            "guild_id" : guild.get() as f64
-                        },
-                        None,
-                    )
+                let gid_i64 = guild.get() as i64;
+                let gid_f64 = guild.get() as f64;
+
+                // 1) Try the new i64 storage first.
+                let find_result = sync_collections
+                    .find_one(doc! { "guild_id": gid_i64 }, None)
                     .await;
-                match find_result {
-                    Ok(x) => {
-                        let new_config = match x {
-                            Some(document) => GuildConfig::load(
-                                &guild,
-                                document.get_bool("auto_magnitute_enable").unwrap_or(false),
-                                ImageSize::string_to_value(
-                                    document.get_str("auto_magnitute_config").unwrap_or("Auto"),
-                                ),
-                                document.get_bool("auto_transfer_webp").unwrap_or(false),
-                            ),
-                            None => {
-                                if let Err(why) = collections
+
+                let found_doc = match find_result {
+                    Ok(opt) => opt,
+                    Err(why) => {
+                        error!(
+                            "an error occured when loading data from DB (i64): guildid: {}\n{:?}",
+                            guild.get(),
+                            why
+                        );
+                        return;
+                    }
+                };
+
+                let document = match found_doc {
+                    Some(doc) => doc,
+                    None => {
+                        // 2) Fall back to the legacy f64 record (precision-lossy).
+                        match sync_collections
+                            .find_one(doc! { "guild_id": gid_f64 }, None)
+                            .await
+                        {
+                            Ok(Some(legacy)) => {
+                                // Reconcile: write an i64 record using the *real* guild id, drop the f64 doc.
+                                let auto_enable =
+                                    legacy.get_bool("auto_magnitute_enable").unwrap_or(false);
+                                let auto_config = legacy
+                                    .get_str("auto_magnitute_config")
+                                    .unwrap_or("Auto")
+                                    .to_string();
+                                if let Err(why) = sync_collections
+                                    .delete_one(doc! { "guild_id": gid_f64 }, None)
+                                    .await
+                                {
+                                    warn!(
+                                        "legacy f64 doc delete failed (guildid {}): {:?}",
+                                        guild.get(),
+                                        why
+                                    );
+                                }
+                                if let Err(why) = sync_collections
                                     .insert_one(
                                         doc! {
-                                                "guild_id" : guild.get() as f64,
-                                                "auto_magnitute_enable" : false,
-                                                "auto_magnitute_config" : "Auto",
-                                                "auto_transfer_webp": false,
+                                            "guild_id": gid_i64,
+                                            "auto_magnitute_enable": auto_enable,
+                                            "auto_magnitute_config": auto_config.clone(),
                                         },
                                         None,
                                     )
                                     .await
                                 {
                                     error!(
-                                        "Couldn't added new DB to: guildid: {}, {:?}",
+                                        "reconcile insert failed (guildid {}): {:?}",
                                         guild.get(),
                                         why
                                     );
                                     return;
                                 }
-
-                                GuildConfig::new(&guild)
+                                info!(
+                                    "guild {} reconciled from f64 → i64 (auto_enable={}, config={})",
+                                    guild.get(),
+                                    auto_enable,
+                                    auto_config
+                                );
+                                let mut tmp = bson::Document::new();
+                                tmp.insert("auto_magnitute_enable", Bson::Boolean(auto_enable));
+                                tmp.insert("auto_magnitute_config", Bson::String(auto_config));
+                                tmp
                             }
-                        };
+                            Ok(None) => {
+                                // No record at all → create a fresh one.
+                                if let Err(why) = sync_collections
+                                    .insert_one(
+                                        doc! {
+                                            "guild_id": gid_i64,
+                                            "auto_magnitute_enable": false,
+                                            "auto_magnitute_config": "Auto",
+                                        },
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    error!(
+                                        "Couldn't add new DB record: guildid: {}, {:?}",
+                                        guild.get(),
+                                        why
+                                    );
+                                    return;
+                                }
+                                let mut guilds_config = sync_guilds_config.write().await;
+                                guilds_config.insert(
+                                    key,
+                                    std::sync::Arc::new(tokio::sync::Mutex::new(
+                                        GuildConfig::new(&guild),
+                                    )),
+                                );
+                                info!("guild {} loaded (new).", guild.get());
+                                return;
+                            }
+                            Err(why) => {
+                                error!(
+                                    "an error occured when loading data from DB (f64 fallback): guildid: {}\n{:?}",
+                                    guild.get(),
+                                    why
+                                );
+                                return;
+                            }
+                        }
+                    }
+                };
 
-                        guilds_config.insert(
-                            NonZeroU64::new(guild.get()).unwrap(),
-                            std::sync::Arc::new(tokio::sync::Mutex::new(new_config)),
-                        );
-                    }
-                    Err(why) => {
-                        error!(
-                            "an error occured when loading data from DB: guildid: {}\n{:?}",
-                            guild.get(),
-                            why
-                        );
-                    }
-                }
+                let new_config = GuildConfig::load(
+                    &guild,
+                    document.get_bool("auto_magnitute_enable").unwrap_or(false),
+                    ImageSize::string_to_value(
+                        document.get_str("auto_magnitute_config").unwrap_or("Auto"),
+                    ),
+                );
+
+                let mut guilds_config = sync_guilds_config.write().await;
+                guilds_config.insert(
+                    key,
+                    std::sync::Arc::new(tokio::sync::Mutex::new(new_config)),
+                );
                 info!("guild {} loaded.", guild.get());
             });
         }

@@ -10,18 +10,42 @@ pub async fn db_delete(
     database: &mongodb::Client,
 ) {
     let guildid = incomplete.id.get();
-    let collections: mongodb::Collection<bson::document::Document> = database
-        .database("scene")
-        .collection(std::env::var("BOT_DB_NAME").unwrap().as_str());
+    let gid_i64 = guildid as i64;
+    let gid_f64 = guildid as f64;
 
-    if let Err(why) = collections
-        .find_one_and_delete(mongodb::bson::doc! { "guild_id" : guildid as f64 }, None)
-        .await
-    {
-        error!(
-            "Couldn't delete new DB from: guildid: {} {:?}",
-            guildid, why
-        );
+    let db_name = match std::env::var("BOT_DB_NAME") {
+        Ok(v) => v,
+        Err(e) => {
+            error!("BOT_DB_NAME not set: {:?}", e);
+            return;
+        }
+    };
+    let collections: mongodb::Collection<bson::document::Document> =
+        database.database("scene").collection(&db_name);
+
+    // i64 record를 먼저 삭제. 못 찾으면 legacy f64 record도 시도.
+    let i64_result = collections
+        .find_one_and_delete(mongodb::bson::doc! { "guild_id": gid_i64 }, None)
+        .await;
+    match i64_result {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            if let Err(why) = collections
+                .find_one_and_delete(mongodb::bson::doc! { "guild_id": gid_f64 }, None)
+                .await
+            {
+                error!(
+                    "Couldn't delete DB record (f64 fallback) for guildid: {} {:?}",
+                    guildid, why
+                );
+            }
+        }
+        Err(why) => {
+            error!(
+                "Couldn't delete DB record for guildid: {} {:?}",
+                guildid, why
+            );
+        }
     }
 
     match GuildConfig::delete(&incomplete.id, ctx).await {

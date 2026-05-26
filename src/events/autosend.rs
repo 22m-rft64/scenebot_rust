@@ -1,3 +1,4 @@
+use lazy_static::lazy_static;
 use log::error;
 use regex::Regex;
 use serenity::{
@@ -14,15 +15,19 @@ use crate::GlobalGuildConfigs;
 use crate::utils::scene_core::{get_resized_image, merge_two_emojis, EmojiFilter};
 use std::num::NonZeroU64;
 
+lazy_static! {
+    static ref SINGLE_EMOJI_RE: Regex = Regex::new(r"^<a?:.+?:\d+>$").unwrap();
+    static ref DOUBLE_EMOJI_RE: Regex = Regex::new(r"^(<a?:.+?:\d+>)(<a?:.+?:\d+>)$").unwrap();
+}
+
 impl EmojiFilter for Message {
     fn emoji_format_filter(&self) -> Result<(bool, String), ()> {
         let msg_content_vec: Vec<&str> = self.content.split(':').collect();
-        let content_regex: Regex = Regex::new(r"^<a?:.+?:\d+>$").unwrap();
 
         if self.referenced_message.is_some()
             || self.author.bot
             || !self.attachments.is_empty()
-            || !content_regex.is_match(&self.content)
+            || !SINGLE_EMOJI_RE.is_match(&self.content)
             || !self.mentions.is_empty()
             || msg_content_vec.len() != 3
         {
@@ -43,9 +48,7 @@ impl EmojiFilter for Message {
     }
 
     fn double_emoji_format_filter(&self) -> Result<(bool, String, String), ()> {
-        let content_regex: Regex = Regex::new(r"^(<a?:.+?:\d+>)(<a?:.+?:\d+>)$").unwrap();
-
-        if !content_regex.is_match(&self.content)
+        if !DOUBLE_EMOJI_RE.is_match(&self.content)
             || self.author.bot
             || !self.attachments.is_empty()
             || !self.mentions.is_empty()
@@ -54,9 +57,18 @@ impl EmojiFilter for Message {
             return Err(());
         }
 
-        let captures = content_regex.captures(&self.content).unwrap();
-        let first_emoji = captures.get(1).unwrap().as_str();
-        let second_emoji = captures.get(2).unwrap().as_str();
+        let captures = match DOUBLE_EMOJI_RE.captures(&self.content) {
+            Some(c) => c,
+            None => return Err(()),
+        };
+        let first_emoji = match captures.get(1) {
+            Some(m) => m.as_str(),
+            None => return Err(()),
+        };
+        let second_emoji = match captures.get(2) {
+            Some(m) => m.as_str(),
+            None => return Err(()),
+        };
 
         let first_is_animated = first_emoji.starts_with("<a:");
         let second_is_animated = second_emoji.starts_with("<a:");
@@ -71,7 +83,7 @@ impl EmojiFilter for Message {
                 return Err(());
             }
             let mut id = parts[2].to_string();
-            id.pop(); // '>' 제거
+            id.pop();
             id
         };
 
@@ -81,11 +93,11 @@ impl EmojiFilter for Message {
                 return Err(());
             }
             let mut id = parts[2].to_string();
-            id.pop(); // '>' 제거
+            id.pop();
             id
         };
 
-        let is_png = !first_is_animated; // 둘 다 PNG이면 true, 둘 다 GIF이면 false
+        let is_png = !first_is_animated;
         let format = if is_png { "webp" } else { "gif" };
 
         let first_url = format!("https://cdn.discordapp.com/emojis/{}.{}", first_id, format);
@@ -96,13 +108,11 @@ impl EmojiFilter for Message {
 }
 
 pub async fn auto_send_transfered_image(ctx: &Context, msg: &Message) {
-    // 1. filter
     let filtered = match msg.emoji_format_filter() {
         Ok(result) => result,
         Err(()) => return,
     };
 
-    // 2. get guild config
     let guild_id = match msg.guild_id {
         Some(id) => match NonZeroU64::new(id.get()) {
             Some(id) => id,
@@ -113,17 +123,17 @@ pub async fn auto_send_transfered_image(ctx: &Context, msg: &Message) {
 
     let config = match get_guild_config(ctx, guild_id).await {
         Some(config) => config,
-        None => return, // 자동 확대 기능이 비활성화된 경우
+        None => return,
     };
 
     let (_, size_config) = config;
 
-    // 3. delete message
+    // 메시지 삭제 실패하면 중복 전송을 막기 위해 그냥 종료.
     if let Err(why) = msg.delete(&ctx.http).await {
-        error!("couldn't delete message. {:?}", why);
+        error!("couldn't delete message, skipping resend: {:?}", why);
+        return;
     }
 
-    // 4. send emoji
     let (is_png, img_url) = filtered;
 
     let result = if matches!(
@@ -133,7 +143,7 @@ pub async fn auto_send_transfered_image(ctx: &Context, msg: &Message) {
         let size = match size_config {
             HyperTechniqueOfLisaSuFinger => "?size=16",
             Small => "?size=64",
-            Medium => "?size=256",
+            Medium => "?size=128",
             _ => "",
         };
 
@@ -153,7 +163,7 @@ pub async fn auto_send_double_emoji(ctx: &Context, msg: &Message) {
         Err(()) => return,
     };
 
-    // PNG only
+    // 현재는 정적 이모지(PNG/WebP) 더블콘만 지원. GIF는 아직 미구현.
     let (is_png, first_url, second_url) = filtered;
     if !is_png {
         return;
@@ -167,28 +177,23 @@ pub async fn auto_send_double_emoji(ctx: &Context, msg: &Message) {
         None => return,
     };
 
-    let Some(config) = get_guild_config(ctx, guild_id).await else {
+    let Some(_config) = get_guild_config(ctx, guild_id).await else {
         return;
     };
 
-    let (_, size_config) = config;
-
     if let Err(why) = msg.delete(&ctx.http).await {
-        error!("couldn't delete message. {:?}", why);
+        error!("couldn't delete message, skipping resend: {:?}", why);
+        return;
     }
 
     let result = match merge_two_emojis(&first_url, &second_url).await {
-        Ok(merged_image) => {
-            // 5. 합쳐진 이미지 전송
-            send_merged_emoji(ctx, msg, merged_image).await
-        }
+        Ok(merged_image) => send_merged_emoji(ctx, msg, merged_image).await,
         Err(e) => {
             error!("Failed to merge emojis: {:?}", e);
             return;
         }
     };
 
-    // 6. 에러 처리
     if let Err(why) = result {
         error!("send message error: {:?}", why);
     }
@@ -197,17 +202,11 @@ pub async fn auto_send_double_emoji(ctx: &Context, msg: &Message) {
 async fn get_guild_config(ctx: &Context, guild_id: NonZeroU64) -> Option<(bool, ImageSize)> {
     let counter_lock = {
         let data_read = ctx.data.read().await;
-        data_read
-            .get::<GlobalGuildConfigs>()
-            .expect("poisened")
-            .clone()
+        data_read.get::<GlobalGuildConfigs>()?.clone()
     };
 
     let guilds_config = counter_lock.read().await;
-    let gconfig_lock = match guilds_config.get(&guild_id) {
-        Some(lock) => lock,
-        None => return None,
-    };
+    let gconfig_lock = guilds_config.get(&guild_id)?;
 
     let gconfig = gconfig_lock.lock().await;
 
@@ -229,13 +228,14 @@ async fn send_emoji_as_url(
 ) -> Result<Message, serenity::Error> {
     let display_name = get_user_display_name(msg);
 
-    // 유저 이름 먼저 보내기
-    msg.channel_id
+    if let Err(why) = msg
+        .channel_id
         .say(&ctx.http, format!("**{}** :", display_name))
         .await
-        .unwrap();
+    {
+        error!("couldn't send display-name line: {:?}", why);
+    }
 
-    // 이모지 URL 보내기
     msg.channel_id
         .say(&ctx.http, format!("{}{}", img_url, size))
         .await
@@ -250,16 +250,22 @@ async fn send_emoji_as_file(
 ) -> Result<Message, serenity::Error> {
     let display_name = get_user_display_name(msg);
 
-    let files = [if is_png {
-        get_resized_image(ctx, img_url, size_config).await
+    let attachment = if is_png {
+        match get_resized_image(ctx, img_url, size_config).await {
+            Some(att) => att,
+            None => {
+                error!("resize failed, falling back to direct URL attachment");
+                CreateAttachment::url(&ctx.http, img_url).await?
+            }
+        }
     } else {
-        CreateAttachment::url(&ctx.http, img_url).await.unwrap()
-    }];
+        CreateAttachment::url(&ctx.http, img_url).await?
+    };
 
     msg.channel_id
         .send_files(
             &ctx.http,
-            files,
+            [attachment],
             CreateMessage::new().content(format!("**{}** :", display_name)),
         )
         .await
@@ -272,10 +278,8 @@ async fn send_merged_emoji(
 ) -> Result<Message, serenity::Error> {
     let display_name = get_user_display_name(msg);
 
-    // 합쳐진 이미지를 첨부 파일로 생성
     let attachment = CreateAttachment::bytes(merged_image, "double_emoji.png");
 
-    // 메시지와 함께 이미지 전송
     msg.channel_id
         .send_files(
             &ctx.http,
@@ -288,9 +292,9 @@ async fn send_merged_emoji(
 fn get_user_display_name(msg: &Message) -> String {
     let global_username = msg
         .author
-        .clone()
         .global_name
-        .unwrap_or(msg.author.clone().name);
+        .clone()
+        .unwrap_or_else(|| msg.author.name.clone());
 
     match &msg.member {
         Some(m) => match &m.nick {

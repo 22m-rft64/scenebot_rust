@@ -8,14 +8,11 @@ use serenity::{
 
 use super::explicit_command_list::COMMAND_LIST;
 
-pub enum CommandType {
-    InitSetting,
-    NormalCommand,
-    MusicCommand,
-}
-
 pub async fn seperate_command(command: CommandInteraction, ctx: &Context) {
-    command.defer(&ctx.http).await.unwrap();
+    if let Err(why) = command.defer(&ctx.http).await {
+        error!("defer failed for {}: {:?}", command.data.name, why);
+        return;
+    }
 
     let cmd_result = match COMMAND_LIST.commands.get(command.data.name.as_str()) {
         Some(exist_command) => {

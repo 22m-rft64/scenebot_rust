@@ -36,7 +36,7 @@ pub struct CommandList {
 
 impl CommandList {
     pub async fn register_commands(&'static self, gid: GuildId, ctx: &Context) {
-        for (_, cmd) in &self.commands {
+        for cmd in self.commands.values() {
             if let Err(why) = gid.create_command(&ctx.http, cmd.register()).await {
                 error!("Couldn't create application command: {:#?}", why);
             }

@@ -4,7 +4,6 @@ use serenity::{
     client::Context,
     model::{
         application::{CommandDataOption, CommandInteraction, CommandOptionType},
-        permissions::Permissions,
         prelude::Message,
     },
     Error,
@@ -27,51 +26,65 @@ impl CommandInterface for SendSizedEmoji {
         options: &[CommandDataOption],
         command: &CommandInteraction,
     ) -> Result<Message, Error> {
-        let emoji = options[0].value.as_str();
-        let size_num = options[1].value.as_i64();
+        let emoji = options.first().and_then(|o| o.value.as_str());
+        let size_num = options.get(1).and_then(|o| o.value.as_i64());
 
-        if size_num.is_none() || emoji.is_none() {
+        let (Some(emoji), Some(size_num)) = (emoji, size_num) else {
             return command
                 .edit_response(
                     &ctx.http,
-                    EditInteractionResponse::default().content("명령어를 조건에 맞게 입력해주세요"),
+                    EditInteractionResponse::default()
+                        .content("명령어를 조건에 맞게 입력해주세요"),
                 )
                 .await;
-        }
+        };
 
-        let filtered = emoji_format_filter(emoji.unwrap());
-        if filtered.is_err() {
-            return command
-                .edit_response(
-                    &ctx.http,
-                    EditInteractionResponse::default().content("제대로 된 이모지를 입력해주세요"),
-                )
-                .await;
-        }
-        let (is_png, img_url) = filtered.unwrap();
-        let resized_emoji = get_resized_image(
-            ctx,
-            img_url.as_ref(),
-            &(if !is_png {
-                ImageSize::Auto
-            } else {
-                match size_num.unwrap() {
-                    0 => ImageSize::HyperTechniqueOfLisaSuFinger,
-                    1 => ImageSize::Small,
-                    2 => ImageSize::Medium,
-                    3 => ImageSize::Large,
-                    _ => ImageSize::HyperSuperUltraSexFeaturedFuckingLarge,
-                }
-            }),
-        )
-        .await;
+        let filtered = match emoji_format_filter(emoji) {
+            Ok(f) => f,
+            Err(()) => {
+                return command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::default()
+                            .content("제대로 된 이모지를 입력해주세요"),
+                    )
+                    .await;
+            }
+        };
 
-        command
-            .edit_response(
-                &ctx.http,
-                EditInteractionResponse::default().new_attachment(resized_emoji),
-            )
-            .await
+        let (is_png, img_url) = filtered;
+        let target_size = if !is_png {
+            ImageSize::Auto
+        } else {
+            match size_num {
+                0 => ImageSize::HyperTechniqueOfLisaSuFinger,
+                1 => ImageSize::Small,
+                2 => ImageSize::Medium,
+                3 => ImageSize::Large,
+                4 => ImageSize::HyperSuperUltraSexFeaturedFuckingLarge,
+                _ => ImageSize::Auto,
+            }
+        };
+
+        match get_resized_image(ctx, img_url.as_ref(), &target_size).await {
+            Some(resized_emoji) => {
+                command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::default().new_attachment(resized_emoji),
+                    )
+                    .await
+            }
+            None => {
+                command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::default()
+                            .content("이모지를 변환하는 데 실패했습니다."),
+                    )
+                    .await
+            }
+        }
     }
 
     fn name(&self) -> String {

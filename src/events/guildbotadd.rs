@@ -20,7 +20,7 @@ pub async fn senddm(ctx: &Context, guild: &Guild, is_new: Option<bool>) {
     let teddypicker = UserId::new(653157614452211712);
     match teddypicker.create_dm_channel(&ctx.http).await {
         Ok(channel) => {
-            channel
+            if let Err(why) = channel
                 .say(
                     &ctx.http,
                     format!(
@@ -30,7 +30,9 @@ pub async fn senddm(ctx: &Context, guild: &Guild, is_new: Option<bool>) {
                     ),
                 )
                 .await
-                .expect("Error occured while sending dm to teddypicker.");
+            {
+                error!("error occured while sending dm to teddypicker: {:?}", why);
+            }
         }
         Err(why) => error!("error occured while creating dm channel: {:?}", why),
     }
@@ -60,9 +62,9 @@ pub async fn new_guild_added(ctx: &Context, guild: &Guild, is_new: Option<bool>)
     }
 }
 
-//DB Fetch
-//먼저 DB에 기존 서버 데이터가 있는지 검사
-//있으면 Fetch, 없으면 Default값으로 새로 저장하고 메모리에 띄움
+// 봇이 새 서버에 추가되었을 때 호출됨.
+// i64로 저장된 기존 doc이 있으면 그대로 사용 (재초대 시 사용자 설정 보존).
+// 없으면 새 doc 생성. f64 legacy doc은 boot 시 reconcile됨.
 pub async fn db_fetch(
     ctx: &Context,
     guild: &Guild,
@@ -73,49 +75,80 @@ pub async fn db_fetch(
         return;
     }
 
-    let collections = database
-        .database("scene")
-        .collection(std::env::var("BOT_DB_NAME").unwrap().as_str());
+    let db_name = match std::env::var("BOT_DB_NAME") {
+        Ok(v) => v,
+        Err(e) => {
+            error!("BOT_DB_NAME not set: {:?}", e);
+            return;
+        }
+    };
+    let collections: mongodb::Collection<bson::document::Document> =
+        database.database("scene").collection(&db_name);
     let guildid = guild.id.get();
-    let _ = collections
-        .find_one_and_delete(doc! { "guild_id" : guildid as f64 }, None)
-        .await;
-    let new_config = GuildConfig::new(&guild.id);
+    let gid_i64 = guildid as i64;
 
-    if let Err(why) = collections
-        .insert_one(
-            doc! {
-                    "guild_id" : guildid as f64,
-                    "auto_magnitute_enable" : false,
-                    "auto_magnitute_config" : "Auto",
-            },
-            None,
-        )
+    let Some(key) = NonZeroU64::new(guildid) else {
+        error!("guild id is zero on guild_create: {}", guild.name);
+        return;
+    };
+
+    let existed = match collections
+        .find_one(doc! { "guild_id": gid_i64 }, None)
         .await
     {
-        error!(
-            "Couldn't added new DB to: guildid: {}, name: {}, {:?}",
-            guildid, guild.name, why
-        );
-        return;
-    }
+        Ok(opt) => opt.is_some(),
+        Err(why) => {
+            error!(
+                "couldn't query DB for guild_id {} on new-guild-add: {:?}",
+                guildid, why
+            );
+            return;
+        }
+    };
 
-    info!(
-        "new DB added to : guildid: {}, name: {}",
-        guildid, guild.name
-    );
+    if !existed {
+        if let Err(why) = collections
+            .insert_one(
+                doc! {
+                    "guild_id": gid_i64,
+                    "auto_magnitute_enable": false,
+                    "auto_magnitute_config": "Auto",
+                },
+                None,
+            )
+            .await
+        {
+            error!(
+                "Couldn't add new DB record (guildid: {}, name: {}): {:?}",
+                guildid, guild.name, why
+            );
+            return;
+        }
+        info!(
+            "new DB record added: guildid: {}, name: {}",
+            guildid, guild.name
+        );
+    } else {
+        info!(
+            "existing DB record kept on re-invite: guildid: {}, name: {}",
+            guildid, guild.name
+        );
+    }
 
     let counter_lock = {
         let data_read = ctx.data.read().await;
-        data_read
-            .get::<GlobalGuildConfigs>()
-            .expect("poisened")
-            .clone()
+        match data_read.get::<GlobalGuildConfigs>() {
+            Some(c) => c.clone(),
+            None => {
+                error!("GlobalGuildConfigs not initialised");
+                return;
+            }
+        }
     };
     let mut guilds_config = counter_lock.write().await;
     guilds_config
-        .entry(NonZeroU64::new(guildid).unwrap())
-        .or_insert(std::sync::Arc::new(tokio::sync::Mutex::new(new_config)));
+        .entry(key)
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(GuildConfig::new(&guild.id))));
 }
 
 pub async fn set_bot_status(ctx: &Context) {
