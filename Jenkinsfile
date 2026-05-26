@@ -43,6 +43,7 @@ pipeline {
             steps {
                 withCredentials([file(credentialsId: 'scenebot-env', variable: 'ENVFILE')]) {
                     sh '''
+                        set +x
                         set -a
                         . "$ENVFILE"
                         set +a
@@ -64,6 +65,7 @@ pipeline {
             steps {
                 withCredentials([file(credentialsId: 'scenebot-env', variable: 'ENVFILE')]) {
                     sh '''
+                        set +x
                         set -a
                         . "$ENVFILE"
                         set +a
@@ -85,6 +87,7 @@ pipeline {
             steps {
                 withCredentials([file(credentialsId: 'scenebot-env', variable: 'ENVFILE')]) {
                     sh '''
+                        set +x
                         docker compose --env-file "$ENVFILE" down --remove-orphans || true
                         docker compose --env-file "$ENVFILE" up -d
                     '''

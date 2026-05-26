@@ -9,14 +9,6 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# 의존성 캐시 레이어: Cargo.toml + Cargo.lock만 먼저 복사해서 deps 빌드.
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src src/bin && \
-    echo "fn main() {}" > src/main.rs && \
-    echo "fn main() {}" > src/bin/migrate_guild_ids.rs && \
-    cargo build --release --bins || true && \
-    rm -rf src
-
 COPY . .
 RUN cargo build --release --bins
 
