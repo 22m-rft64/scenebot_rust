@@ -143,6 +143,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn fetch_all_guilds(token: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    use log::warn;
+    use tokio::time::{sleep, Duration};
+
     let client = reqwest::Client::new();
     let mut all_guilds: Vec<String> = Vec::new();
     let mut after: Option<String> = None;
@@ -153,22 +156,42 @@ async fn fetch_all_guilds(token: &str) -> Result<Vec<String>, Box<dyn Error>> {
             url.push_str(&format!("&after={}", a));
         }
 
-        let resp = client
-            .get(&url)
-            .header("Authorization", format!("Bot {}", token))
-            .send()
-            .await?;
+        // Discord rate-limit retry loop.
+        let guilds: Vec<PartialGuild> = loop {
+            let resp = client
+                .get(&url)
+                .header("Authorization", format!("Bot {}", token))
+                .send()
+                .await?;
 
-        if !resp.status().is_success() {
-            return Err(format!(
-                "Discord API error: {} - {}",
-                resp.status(),
-                resp.text().await.unwrap_or_default()
-            )
-            .into());
-        }
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_after_secs: f64 = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(2.0);
+                let sleep_ms = (retry_after_secs * 1000.0) as u64 + 250;
+                warn!(
+                    "Discord rate-limited, sleeping {}ms before retry",
+                    sleep_ms
+                );
+                sleep(Duration::from_millis(sleep_ms)).await;
+                continue;
+            }
 
-        let guilds: Vec<PartialGuild> = resp.json().await?;
+            if !resp.status().is_success() {
+                return Err(format!(
+                    "Discord API error: {} - {}",
+                    resp.status(),
+                    resp.text().await.unwrap_or_default()
+                )
+                .into());
+            }
+
+            break resp.json().await?;
+        };
+
         if guilds.is_empty() {
             break;
         }
