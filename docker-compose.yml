@@ -1,0 +1,30 @@
+services:
+  irem:
+    image: scene_rust:latest
+    container_name: emojibot-irem
+    restart: unless-stopped
+    environment:
+      DISCORD_BOT_TOKEN: ${IREM_DISCORD_BOT_TOKEN}
+      DB_URI: ${DB_URI}
+      BOT_DB_NAME: trainingsuit_mari_guilds
+      RUST_LOG: scene_rust=info,warn
+      RUST_BACKTRACE: "1"
+    networks:
+      - shared-mongodb-net
+
+  scene:
+    image: scene_rust:latest
+    container_name: emojibot-scene
+    restart: unless-stopped
+    environment:
+      DISCORD_BOT_TOKEN: ${SCENE_DISCORD_BOT_TOKEN}
+      DB_URI: ${DB_URI}
+      BOT_DB_NAME: scene_guilds
+      RUST_LOG: scene_rust=info,warn
+      RUST_BACKTRACE: "1"
+    networks:
+      - shared-mongodb-net
+
+networks:
+  shared-mongodb-net:
+    external: true

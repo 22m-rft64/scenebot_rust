@@ -1,2 +1,7 @@
 target/
 .git/
+.env
+*.env
+.env.*
+Jenkinsfile
+README.md
