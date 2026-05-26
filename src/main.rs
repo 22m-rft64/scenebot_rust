@@ -30,11 +30,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     dotenv().ok();
     init();
 
-    let token = if env::var("DEV").unwrap_or("0".to_string()) == "1" {
-        env::var("DEV_TOKEN").expect("couldn't find token.")
-    } else {
-        env::var("DISCORD_TOKEN").expect("couldn't find token.")
-    };
+    let token = env::var("DISCORD_BOT_TOKEN").expect("DISCORD_BOT_TOKEN is not set");
 
     // Fail fast if BOT_DB_NAME is missing — used everywhere with .unwrap() downstream.
     env::var("BOT_DB_NAME").expect("BOT_DB_NAME is not set");

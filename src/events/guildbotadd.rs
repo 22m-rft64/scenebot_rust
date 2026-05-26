@@ -1,8 +1,7 @@
 use serenity::{
-    builder::CreateCommand,
     client::Context,
     gateway::ActivityData,
-    model::{guild::Guild, id::UserId, prelude::Permissions},
+    model::{guild::Guild, id::UserId},
 };
 
 use log::{error, info};
@@ -10,6 +9,7 @@ use mongodb::bson::doc;
 
 use std::num::NonZeroU64;
 
+use crate::command_handler::explicit_command_list::COMMAND_LIST;
 use crate::utils::guild_config::GuildConfig;
 use crate::GlobalGuildConfigs;
 
@@ -42,29 +42,13 @@ pub async fn new_guild_added(ctx: &Context, guild: &Guild, is_new: Option<bool>)
     if is_new.is_none() || !is_new.unwrap() {
         return;
     }
-
     info!("new guild added: {}, ID: {}", guild.name, guild.id);
-
-    if let Err(why) = guild
-        .id
-        .create_command(
-            &ctx.http,
-            CreateCommand::new("update")
-                .description("봇의 업데이트를 확인해요")
-                .default_member_permissions(Permissions::ADMINISTRATOR),
-        )
-        .await
-    {
-        error!(
-            "error occured while creating update command at {}\n{:#?}",
-            guild.id, why
-        );
-    }
+    COMMAND_LIST.register_commands(guild.id, ctx).await;
 }
 
 // 봇이 새 서버에 추가되었을 때 호출됨.
 // i64로 저장된 기존 doc이 있으면 그대로 사용 (재초대 시 사용자 설정 보존).
-// 없으면 새 doc 생성. f64 legacy doc은 boot 시 reconcile됨.
+// 없으면 새 doc 생성.
 pub async fn db_fetch(
     ctx: &Context,
     guild: &Guild,

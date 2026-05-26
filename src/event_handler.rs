@@ -7,7 +7,6 @@ use serenity::{
 };
 
 use crate::command_handler::handler::seperate_command;
-use crate::command_handler::update_command::update_cmds::update_command;
 use crate::utils::guild_config::GuildConfig;
 
 use log::info;
@@ -52,17 +51,13 @@ impl EventHandler for DiscordEventHandler {
     async fn message(&self, ctx: Context, msg: Message) {
         tokio::join!(
             autosend::auto_send_transfered_image(&ctx, &msg),
-            autosend::auto_send_double_emoji(&ctx, &msg)
+            autosend::auto_send_multi_emoji(&ctx, &msg)
         );
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(command) = interaction {
-            match command.data.name.as_str() {
-                /* 봇 업데이트 및 처음 초기 세팅 관련 명령어 */
-                "update" => update_command(command, &ctx).await,
-                _ => seperate_command(command, &ctx).await,
-            }
+            seperate_command(command, &ctx).await;
         }
     }
 }

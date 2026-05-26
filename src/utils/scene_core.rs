@@ -15,7 +15,7 @@ use regex::Regex;
 // png인지 확인하는 부울값과 img url을 반환함
 pub trait EmojiFilter {
     fn emoji_format_filter(&self) -> Result<(bool, String), ()>;
-    fn double_emoji_format_filter(&self) -> Result<(bool, String, String), ()>;
+    fn multi_emoji_format_filter(&self) -> Result<(Layout, Vec<String>), ()>;
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -188,58 +188,143 @@ async fn resize_png(img_url: &str, dst_w: u32, dst_h: u32) -> Option<CreateAttac
     Some(CreateAttachment::bytes(inner, "resized.png".to_string()))
 }
 
-pub async fn merge_two_emojis(
-    first_url: &str,
-    second_url: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    use image::{imageops, GenericImageView, ImageFormat};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    Horizontal, // urls.len() ∈ 2..=4. 모든 이미지 높이 128로 정규화 후 가로로 붙임.
+    Vertical,   // urls.len() ∈ 2..=3. 모든 이미지 너비 128로 정규화 후 세로로 붙임.
+    Grid2x2,    // urls.len() == 4. 128x128 정규화 후 2x2 배치.
+    Grid3x3,    // urls.len() == 9. 128x128 정규화 후 3x3 배치.
+}
+
+const CELL: u32 = 128;
+
+type DynErr = Box<dyn std::error::Error + Send + Sync>;
+
+pub async fn merge_multiple_images(urls: &[String], layout: Layout) -> Result<Vec<u8>, DynErr> {
+    let expected_ok = match layout {
+        Layout::Horizontal => (2..=4).contains(&urls.len()),
+        Layout::Vertical => (2..=3).contains(&urls.len()),
+        Layout::Grid2x2 => urls.len() == 4,
+        Layout::Grid3x3 => urls.len() == 9,
+    };
+    if !expected_ok {
+        return Err(format!(
+            "merge_multiple_images: invalid url count {} for layout {:?}",
+            urls.len(),
+            layout
+        )
+        .into());
+    }
+
+    let images = fetch_all_png(urls).await?;
+    let normalized = normalize_images(images, layout);
+    encode_canvas(&normalized, layout)
+}
+
+async fn fetch_all_png(urls: &[String]) -> Result<Vec<image::DynamicImage>, DynErr> {
+    use futures::future::try_join_all;
+
+    let bytes_list = try_join_all(urls.iter().map(|u| async move {
+        let resp = reqwest::get(u)
+            .await
+            .map_err(|e| Box::new(e) as DynErr)?;
+        let b = resp.bytes().await.map_err(|e| Box::new(e) as DynErr)?;
+        Ok::<_, DynErr>(b)
+    }))
+    .await?;
+
+    bytes_list
+        .into_iter()
+        .map(|b| image::load_from_memory(&b).map_err(|e| Box::new(e) as DynErr))
+        .collect()
+}
+
+fn normalize_images(images: Vec<image::DynamicImage>, layout: Layout) -> Vec<image::RgbaImage> {
+    use image::imageops::{resize, FilterType};
+    use image::GenericImageView;
+
+    images
+        .into_iter()
+        .map(|img| {
+            let (w, h) = img.dimensions();
+            let (new_w, new_h) = match layout {
+                Layout::Horizontal => {
+                    // height=128, width은 비율 유지
+                    let scale = CELL as f32 / h as f32;
+                    ((w as f32 * scale).round() as u32, CELL)
+                }
+                Layout::Vertical => {
+                    // width=128, height은 비율 유지
+                    let scale = CELL as f32 / w as f32;
+                    (CELL, (h as f32 * scale).round() as u32)
+                }
+                Layout::Grid2x2 | Layout::Grid3x3 => (CELL, CELL),
+            };
+            let new_w = new_w.max(1);
+            let new_h = new_h.max(1);
+            resize(&img.to_rgba8(), new_w, new_h, FilterType::Lanczos3)
+        })
+        .collect()
+}
+
+fn encode_canvas(imgs: &[image::RgbaImage], layout: Layout) -> Result<Vec<u8>, DynErr> {
+    use image::{imageops, ImageFormat};
     use std::io::Cursor;
 
-    let first_emoji_url = format!("{}?size=128", first_url);
-    let second_emoji_url = format!("{}?size=128", second_url);
-
-    let (first_emoji_result, second_emoji_result) = tokio::join!(
-        async {
-            reqwest::get(&first_emoji_url)
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
-                .bytes()
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-        },
-        async {
-            reqwest::get(&second_emoji_url)
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
-                .bytes()
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    let (canvas_w, canvas_h, placements) = match layout {
+        Layout::Horizontal => {
+            let total_w: u32 = imgs.iter().map(|i| i.width()).sum();
+            let max_h: u32 = imgs.iter().map(|i| i.height()).max().unwrap_or(CELL);
+            let mut offset = 0u32;
+            let placements: Vec<(u32, u32)> = imgs
+                .iter()
+                .map(|img| {
+                    let x = offset;
+                    offset += img.width();
+                    (x, 0)
+                })
+                .collect();
+            (total_w, max_h, placements)
         }
-    );
+        Layout::Vertical => {
+            let max_w: u32 = imgs.iter().map(|i| i.width()).max().unwrap_or(CELL);
+            let total_h: u32 = imgs.iter().map(|i| i.height()).sum();
+            let mut offset = 0u32;
+            let placements: Vec<(u32, u32)> = imgs
+                .iter()
+                .map(|img| {
+                    let y = offset;
+                    offset += img.height();
+                    (0, y)
+                })
+                .collect();
+            (max_w, total_h, placements)
+        }
+        Layout::Grid2x2 => {
+            let placements: Vec<(u32, u32)> = (0..4)
+                .map(|i| ((i % 2) as u32 * CELL, (i / 2) as u32 * CELL))
+                .collect();
+            (CELL * 2, CELL * 2, placements)
+        }
+        Layout::Grid3x3 => {
+            let placements: Vec<(u32, u32)> = (0..9)
+                .map(|i| ((i % 3) as u32 * CELL, (i / 3) as u32 * CELL))
+                .collect();
+            (CELL * 3, CELL * 3, placements)
+        }
+    };
 
-    let first_emoji_bytes = first_emoji_result?.to_vec();
-    let second_emoji_bytes = second_emoji_result?.to_vec();
-
-    let first_img = image::load_from_memory(&first_emoji_bytes)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-    let second_img = image::load_from_memory(&second_emoji_bytes)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-    let (width1, height1) = first_img.dimensions();
-    let (width2, height2) = second_img.dimensions();
-
-    let mut merged_img = image::RgbaImage::new(width1 + width2, std::cmp::max(height1, height2));
-
-    imageops::overlay(&mut merged_img, &first_img, 0, 0);
-    imageops::overlay(&mut merged_img, &second_img, width1 as i64, 0);
+    let mut canvas = image::RgbaImage::new(canvas_w, canvas_h);
+    for (img, (x, y)) in imgs.iter().zip(placements.iter()) {
+        imageops::overlay(&mut canvas, img, *x as i64, *y as i64);
+    }
 
     let mut result_buffer = Vec::new();
     {
         let mut cursor = Cursor::new(&mut result_buffer);
-        merged_img
+        canvas
             .write_to(&mut cursor, ImageFormat::Png)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            .map_err(|e| Box::new(e) as DynErr)?;
     }
-
     Ok(result_buffer)
 }

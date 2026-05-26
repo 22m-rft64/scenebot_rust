@@ -2,6 +2,7 @@
 name = "scene_rust"
 version = "0.1.0"
 edition = "2021"
+default-run = "scene_rust"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -13,11 +14,11 @@ env_logger = "0.9.1"
 lazy_static = "1.4.0"
 fast_image_resize = "2.5.0"
 image = "0.24.6"
-reqwest = "0.11"
+reqwest = { version = "0.11", features = ["json"] }
 mongodb = "2.1"
 bson = { version = "2", features = ["chrono-0_4"] }
 futures = "0.3"
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 
 [dependencies.tokio]
 version = "1.0"

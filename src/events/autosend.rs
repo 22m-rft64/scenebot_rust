@@ -12,12 +12,33 @@ use crate::utils::scene_core::ImageSize::{
 };
 use crate::GlobalGuildConfigs;
 
-use crate::utils::scene_core::{get_resized_image, merge_two_emojis, EmojiFilter};
+use crate::utils::scene_core::{get_resized_image, merge_multiple_images, EmojiFilter, Layout};
 use std::num::NonZeroU64;
 
 lazy_static! {
     static ref SINGLE_EMOJI_RE: Regex = Regex::new(r"^<a?:.+?:\d+>$").unwrap();
-    static ref DOUBLE_EMOJI_RE: Regex = Regex::new(r"^(<a?:.+?:\d+>)(<a?:.+?:\d+>)$").unwrap();
+    static ref EMOJI_TOKEN_RE: Regex = Regex::new(r"<a?:.+?:\d+>").unwrap();
+    static ref EMOJI_LINE_RE: Regex = Regex::new(r"^(<a?:.+?:\d+>)+$").unwrap();
+}
+
+fn parse_emoji_line(line: &str) -> Option<Vec<&str>> {
+    if !EMOJI_LINE_RE.is_match(line) {
+        return None;
+    }
+    let tokens: Vec<&str> = EMOJI_TOKEN_RE
+        .find_iter(line)
+        .map(|m| m.as_str())
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens)
+    }
+}
+
+fn emoji_id(token: &str) -> Option<&str> {
+    // token: <a?:name:ID>
+    token.rsplit(':').next().and_then(|s| s.strip_suffix('>'))
 }
 
 impl EmojiFilter for Message {
@@ -47,9 +68,8 @@ impl EmojiFilter for Message {
         Ok((is_png, img_url))
     }
 
-    fn double_emoji_format_filter(&self) -> Result<(bool, String, String), ()> {
-        if !DOUBLE_EMOJI_RE.is_match(&self.content)
-            || self.author.bot
+    fn multi_emoji_format_filter(&self) -> Result<(Layout, Vec<String>), ()> {
+        if self.author.bot
             || !self.attachments.is_empty()
             || !self.mentions.is_empty()
             || self.referenced_message.is_some()
@@ -57,53 +77,57 @@ impl EmojiFilter for Message {
             return Err(());
         }
 
-        let captures = match DOUBLE_EMOJI_RE.captures(&self.content) {
-            Some(c) => c,
-            None => return Err(()),
-        };
-        let first_emoji = match captures.get(1) {
-            Some(m) => m.as_str(),
-            None => return Err(()),
-        };
-        let second_emoji = match captures.get(2) {
-            Some(m) => m.as_str(),
-            None => return Err(()),
-        };
-
-        let first_is_animated = first_emoji.starts_with("<a:");
-        let second_is_animated = second_emoji.starts_with("<a:");
-
-        if first_is_animated != second_is_animated {
+        let lines: Vec<&str> = self
+            .content
+            .split('\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        if lines.is_empty() {
             return Err(());
         }
 
-        let first_id = {
-            let parts: Vec<&str> = first_emoji.split(':').collect();
-            if parts.len() != 3 {
-                return Err(());
+        // 각 라인이 이모지 토큰만으로 구성되어야 함.
+        let mut parsed: Vec<Vec<&str>> = Vec::with_capacity(lines.len());
+        for line in &lines {
+            match parse_emoji_line(line) {
+                Some(tokens) => parsed.push(tokens),
+                None => return Err(()),
             }
-            let mut id = parts[2].to_string();
-            id.pop();
-            id
+        }
+
+        // GIF(animated) 이모지가 하나라도 포함되면 multi-emoji merge 비활성.
+        if parsed.iter().flatten().any(|t| t.starts_with("<a:")) {
+            return Err(());
+        }
+
+        let counts: Vec<usize> = parsed.iter().map(|l| l.len()).collect();
+        let total: usize = counts.iter().sum();
+
+        let layout = if parsed.len() == 1 && (2..=4).contains(&counts[0]) {
+            Layout::Horizontal
+        } else if (2..=3).contains(&parsed.len()) && counts.iter().all(|&c| c == 1) {
+            Layout::Vertical
+        } else if parsed.len() == 2 && counts == [2, 2] {
+            Layout::Grid2x2
+        } else if parsed.len() == 3 && counts == [3, 3, 3] {
+            Layout::Grid3x3
+        } else {
+            return Err(());
         };
 
-        let second_id = {
-            let parts: Vec<&str> = second_emoji.split(':').collect();
-            if parts.len() != 3 {
-                return Err(());
-            }
-            let mut id = parts[2].to_string();
-            id.pop();
-            id
-        };
+        let urls: Vec<String> = parsed
+            .into_iter()
+            .flatten()
+            .filter_map(|token| {
+                emoji_id(token)
+                    .map(|id| format!("https://cdn.discordapp.com/emojis/{}.png?size=128", id))
+            })
+            .collect();
+        if urls.len() != total {
+            return Err(());
+        }
 
-        let is_png = !first_is_animated;
-        let format = if is_png { "webp" } else { "gif" };
-
-        let first_url = format!("https://cdn.discordapp.com/emojis/{}.{}", first_id, format);
-        let second_url = format!("https://cdn.discordapp.com/emojis/{}.{}", second_id, format);
-
-        Ok((is_png, first_url, second_url))
+        Ok((layout, urls))
     }
 }
 
@@ -128,7 +152,6 @@ pub async fn auto_send_transfered_image(ctx: &Context, msg: &Message) {
 
     let (_, size_config) = config;
 
-    // 메시지 삭제 실패하면 중복 전송을 막기 위해 그냥 종료.
     if let Err(why) = msg.delete(&ctx.http).await {
         error!("couldn't delete message, skipping resend: {:?}", why);
         return;
@@ -157,17 +180,11 @@ pub async fn auto_send_transfered_image(ctx: &Context, msg: &Message) {
     }
 }
 
-pub async fn auto_send_double_emoji(ctx: &Context, msg: &Message) {
-    let filtered = match msg.double_emoji_format_filter() {
-        Ok(result) => result,
+pub async fn auto_send_multi_emoji(ctx: &Context, msg: &Message) {
+    let (layout, urls) = match msg.multi_emoji_format_filter() {
+        Ok(r) => r,
         Err(()) => return,
     };
-
-    // 현재는 정적 이모지(PNG/WebP) 더블콘만 지원. GIF는 아직 미구현.
-    let (is_png, first_url, second_url) = filtered;
-    if !is_png {
-        return;
-    }
 
     let guild_id = match msg.guild_id {
         Some(id) => match NonZeroU64::new(id.get()) {
@@ -177,24 +194,24 @@ pub async fn auto_send_double_emoji(ctx: &Context, msg: &Message) {
         None => return,
     };
 
-    let Some(_config) = get_guild_config(ctx, guild_id).await else {
+    if get_guild_config(ctx, guild_id).await.is_none() {
         return;
-    };
+    }
 
     if let Err(why) = msg.delete(&ctx.http).await {
         error!("couldn't delete message, skipping resend: {:?}", why);
         return;
     }
 
-    let result = match merge_two_emojis(&first_url, &second_url).await {
-        Ok(merged_image) => send_merged_emoji(ctx, msg, merged_image).await,
+    let merged = match merge_multiple_images(&urls, layout).await {
+        Ok(img) => img,
         Err(e) => {
-            error!("Failed to merge emojis: {:?}", e);
+            error!("Failed to merge ({:?}): {:?}", layout, e);
             return;
         }
     };
 
-    if let Err(why) = result {
+    if let Err(why) = send_merged_emoji(ctx, msg, merged).await {
         error!("send message error: {:?}", why);
     }
 }
@@ -278,7 +295,7 @@ async fn send_merged_emoji(
 ) -> Result<Message, serenity::Error> {
     let display_name = get_user_display_name(msg);
 
-    let attachment = CreateAttachment::bytes(merged_image, "double_emoji.png");
+    let attachment = CreateAttachment::bytes(merged_image, "merged_emoji.png");
 
     msg.channel_id
         .send_files(

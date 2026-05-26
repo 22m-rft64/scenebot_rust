@@ -1,12 +1,10 @@
+use crate::command_handler::explicit_command_list::COMMAND_LIST;
 use crate::{utils::scene_core::ImageSize, GlobalGuildConfigs};
-use log::{error, info, warn};
+use log::{error, info};
 
-use mongodb::bson::{doc, Bson};
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
-use serenity::{
-    all::Permissions, builder::CreateCommand, client::Context, gateway::ActivityData,
-    model::id::GuildId,
-};
+use serenity::{client::Context, gateway::ActivityData, model::id::GuildId};
 use std::num::NonZeroU64;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,20 +87,9 @@ impl GuildConfig {
         for guild in ctx.cache.guilds() {
             let sync_collections = collections.clone();
             let sync_guilds_config = counter_lock.clone();
-            if let Err(why) = guild
-                .create_command(
-                    &ctx.http,
-                    CreateCommand::new("update")
-                        .description("봇의 업데이트를 확인해요")
-                        .default_member_permissions(Permissions::ADMINISTRATOR),
-                )
-                .await
-            {
-                error!(
-                    "error occured while creating update command at {}\n{:#?}",
-                    guild, why
-                );
-            }
+            // 모든 명령어를 길드별로 자동 등록 (/update 폐기됨).
+            COMMAND_LIST.register_commands(guild, ctx).await;
+
             tokio::spawn(async move {
                 let Some(key) = NonZeroU64::new(guild.get()) else {
                     error!("guild id is zero: {:?}", guild);
@@ -111,18 +98,15 @@ impl GuildConfig {
                 info!("loading guild {}..", key);
 
                 let gid_i64 = guild.get() as i64;
-                let gid_f64 = guild.get() as f64;
 
-                // 1) Try the new i64 storage first.
-                let find_result = sync_collections
+                let found = match sync_collections
                     .find_one(doc! { "guild_id": gid_i64 }, None)
-                    .await;
-
-                let found_doc = match find_result {
+                    .await
+                {
                     Ok(opt) => opt,
                     Err(why) => {
                         error!(
-                            "an error occured when loading data from DB (i64): guildid: {}\n{:?}",
+                            "an error occured when loading data from DB: guildid: {}\n{:?}",
                             guild.get(),
                             why
                         );
@@ -130,110 +114,38 @@ impl GuildConfig {
                     }
                 };
 
-                let document = match found_doc {
-                    Some(doc) => doc,
+                let new_config = match found {
+                    Some(document) => GuildConfig::load(
+                        &guild,
+                        document.get_bool("auto_magnitute_enable").unwrap_or(false),
+                        ImageSize::string_to_value(
+                            document.get_str("auto_magnitute_config").unwrap_or("Auto"),
+                        ),
+                    ),
                     None => {
-                        // 2) Fall back to the legacy f64 record (precision-lossy).
-                        match sync_collections
-                            .find_one(doc! { "guild_id": gid_f64 }, None)
+                        // 마이그레이션 누락된 길드 — 새 doc 생성.
+                        if let Err(why) = sync_collections
+                            .insert_one(
+                                doc! {
+                                    "guild_id": gid_i64,
+                                    "auto_magnitute_enable": false,
+                                    "auto_magnitute_config": "Auto",
+                                },
+                                None,
+                            )
                             .await
                         {
-                            Ok(Some(legacy)) => {
-                                // Reconcile: write an i64 record using the *real* guild id, drop the f64 doc.
-                                let auto_enable =
-                                    legacy.get_bool("auto_magnitute_enable").unwrap_or(false);
-                                let auto_config = legacy
-                                    .get_str("auto_magnitute_config")
-                                    .unwrap_or("Auto")
-                                    .to_string();
-                                if let Err(why) = sync_collections
-                                    .delete_one(doc! { "guild_id": gid_f64 }, None)
-                                    .await
-                                {
-                                    warn!(
-                                        "legacy f64 doc delete failed (guildid {}): {:?}",
-                                        guild.get(),
-                                        why
-                                    );
-                                }
-                                if let Err(why) = sync_collections
-                                    .insert_one(
-                                        doc! {
-                                            "guild_id": gid_i64,
-                                            "auto_magnitute_enable": auto_enable,
-                                            "auto_magnitute_config": auto_config.clone(),
-                                        },
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "reconcile insert failed (guildid {}): {:?}",
-                                        guild.get(),
-                                        why
-                                    );
-                                    return;
-                                }
-                                info!(
-                                    "guild {} reconciled from f64 → i64 (auto_enable={}, config={})",
-                                    guild.get(),
-                                    auto_enable,
-                                    auto_config
-                                );
-                                let mut tmp = bson::Document::new();
-                                tmp.insert("auto_magnitute_enable", Bson::Boolean(auto_enable));
-                                tmp.insert("auto_magnitute_config", Bson::String(auto_config));
-                                tmp
-                            }
-                            Ok(None) => {
-                                // No record at all → create a fresh one.
-                                if let Err(why) = sync_collections
-                                    .insert_one(
-                                        doc! {
-                                            "guild_id": gid_i64,
-                                            "auto_magnitute_enable": false,
-                                            "auto_magnitute_config": "Auto",
-                                        },
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "Couldn't add new DB record: guildid: {}, {:?}",
-                                        guild.get(),
-                                        why
-                                    );
-                                    return;
-                                }
-                                let mut guilds_config = sync_guilds_config.write().await;
-                                guilds_config.insert(
-                                    key,
-                                    std::sync::Arc::new(tokio::sync::Mutex::new(
-                                        GuildConfig::new(&guild),
-                                    )),
-                                );
-                                info!("guild {} loaded (new).", guild.get());
-                                return;
-                            }
-                            Err(why) => {
-                                error!(
-                                    "an error occured when loading data from DB (f64 fallback): guildid: {}\n{:?}",
-                                    guild.get(),
-                                    why
-                                );
-                                return;
-                            }
+                            error!(
+                                "Couldn't add new DB record: guildid: {}, {:?}",
+                                guild.get(),
+                                why
+                            );
+                            return;
                         }
+                        info!("guild {} loaded (new).", guild.get());
+                        GuildConfig::new(&guild)
                     }
                 };
-
-                let new_config = GuildConfig::load(
-                    &guild,
-                    document.get_bool("auto_magnitute_enable").unwrap_or(false),
-                    ImageSize::string_to_value(
-                        document.get_str("auto_magnitute_config").unwrap_or("Auto"),
-                    ),
-                );
 
                 let mut guilds_config = sync_guilds_config.write().await;
                 guilds_config.insert(
