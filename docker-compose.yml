@@ -5,8 +5,8 @@ services:
     restart: unless-stopped
     environment:
       DISCORD_BOT_TOKEN: ${IREM_DISCORD_BOT_TOKEN}
-      DB_URI: ${DB_URI}
-      BOT_DB_NAME: trainingsuit_mari_guilds
+      # Message Content intent 없음 → 씬 초대 안내만 함
+      NOTICE_MODE: "1"
       RUST_LOG: scene_rust=info,warn
       RUST_BACKTRACE: "1"
     networks:

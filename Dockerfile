@@ -27,6 +27,7 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/scene_rust        /app/scene_rust
 COPY --from=builder /app/target/release/migrate_guild_ids /app/migrate_guild_ids
+COPY --from=builder /app/target/release/cleanup_guild_commands /app/cleanup_guild_commands
 
 LABEL scenebot=true
 

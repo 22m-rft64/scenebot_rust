@@ -9,7 +9,6 @@ use mongodb::bson::doc;
 
 use std::num::NonZeroU64;
 
-use crate::command_handler::explicit_command_list::COMMAND_LIST;
 use crate::utils::guild_config::GuildConfig;
 use crate::GlobalGuildConfigs;
 
@@ -38,12 +37,11 @@ pub async fn senddm(ctx: &Context, guild: &Guild, is_new: Option<bool>) {
     }
 }
 
-pub async fn new_guild_added(ctx: &Context, guild: &Guild, is_new: Option<bool>) {
+pub async fn new_guild_added(_ctx: &Context, guild: &Guild, is_new: Option<bool>) {
     if is_new.is_none() || !is_new.unwrap() {
         return;
     }
     info!("new guild added: {}, ID: {}", guild.name, guild.id);
-    COMMAND_LIST.register_commands(guild.id, ctx).await;
 }
 
 // 봇이 새 서버에 추가되었을 때 호출됨.

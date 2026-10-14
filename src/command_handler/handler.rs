@@ -9,7 +9,16 @@ use serenity::{
 use super::explicit_command_list::COMMAND_LIST;
 
 pub async fn seperate_command(command: CommandInteraction, ctx: &Context) {
-    if let Err(why) = command.defer(&ctx.http).await {
+    let ephemeral = COMMAND_LIST
+        .commands
+        .get(command.data.name.as_str())
+        .is_some_and(|c| c.ephemeral());
+    let deferred = if ephemeral {
+        command.defer_ephemeral(&ctx.http).await
+    } else {
+        command.defer(&ctx.http).await
+    };
+    if let Err(why) = deferred {
         error!("defer failed for {}: {:?}", command.data.name, why);
         return;
     }

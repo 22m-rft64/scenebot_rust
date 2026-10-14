@@ -9,9 +9,6 @@ use fast_image_resize as fr;
 
 use image::ImageEncoder;
 
-use lazy_static::lazy_static;
-use regex::Regex;
-
 // png인지 확인하는 부울값과 img url을 반환함
 pub trait EmojiFilter {
     fn emoji_format_filter(&self) -> Result<(bool, String), ()>;
@@ -77,31 +74,6 @@ pub async fn get_resized_image(
         ImageSize::Large => resize_png(img_url, 256, 256).await,
         ImageSize::HyperSuperUltraSexFeaturedFuckingLarge => resize_png(img_url, 300, 300).await,
     }
-}
-
-lazy_static! {
-    static ref SINGLE_EMOJI_RE: Regex = Regex::new(r"^<a?:.+?:\d+>$").unwrap();
-}
-
-pub fn emoji_format_filter(emoji_string: &str) -> Result<(bool, String), ()> {
-    let msg_content_vec: Vec<&str> = emoji_string.split(':').collect();
-    if !SINGLE_EMOJI_RE.is_match(emoji_string) || msg_content_vec.len() != 3 {
-        return Err(());
-    }
-    let mut id = msg_content_vec[2].to_string();
-    id.pop();
-    let mut is_png = false;
-    let img_url = format!(
-        "https://cdn.discordapp.com/emojis/{}.{}",
-        id,
-        if emoji_string.contains("<a:") {
-            "gif"
-        } else {
-            is_png = true;
-            "png"
-        }
-    );
-    Ok((is_png, img_url))
 }
 
 use image::{codecs::png::PngEncoder, ColorType};

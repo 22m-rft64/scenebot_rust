@@ -5,8 +5,10 @@ use serenity::{
     builder::CreateCommand,
     client::Context,
     model::{
-        application::{CommandDataOption, CommandInteraction},
-        id::GuildId,
+        application::{
+            Command, CommandDataOption, CommandInteraction, InstallationContext,
+            InteractionContext,
+        },
         prelude::Message,
     },
     Error,
@@ -28,6 +30,11 @@ pub trait CommandInterface {
     fn name(&self) -> String;
 
     fn register(&self) -> CreateCommand;
+
+    // true면 명령어 친 사람한테만 보임
+    fn ephemeral(&self) -> bool {
+        false
+    }
 }
 
 pub struct CommandList {
@@ -35,11 +42,19 @@ pub struct CommandList {
 }
 
 impl CommandList {
-    pub async fn register_commands(&'static self, gid: GuildId, ctx: &Context) {
-        for cmd in self.commands.values() {
-            if let Err(why) = gid.create_command(&ctx.http, cmd.register()).await {
-                error!("Couldn't create application command: {:#?}", why);
-            }
+    // 글로벌로 한 번에 덮어씀. 서버에서만 보이게 DM/유저설치는 막음.
+    pub async fn register_global(&'static self, ctx: &Context) {
+        let commands: Vec<CreateCommand> = self
+            .commands
+            .values()
+            .map(|cmd| {
+                cmd.register()
+                    .contexts(vec![InteractionContext::Guild])
+                    .integration_types(vec![InstallationContext::Guild])
+            })
+            .collect();
+        if let Err(why) = Command::set_global_commands(&ctx.http, commands).await {
+            error!("Couldn't set global commands: {:#?}", why);
         }
     }
 }
@@ -49,10 +64,8 @@ impl CommandList {
 lazy_static! {
     pub static ref COMMAND_LIST: CommandList = CommandList {
         commands: HashMap::from([
-            ("send", commands::send::get_command()),
             ("config", commands::config::get_command()),
-            ("help", commands::help::get_command()),
-            //("webp", commands::webp_transfer::get_command())
+            ("changelog", commands::changelog::get_command()),
         ])
     };
 }

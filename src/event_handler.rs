@@ -6,7 +6,7 @@ use serenity::{
     model::{application::Interaction, channel::Message, gateway::Ready, guild::Guild},
 };
 
-use crate::command_handler::handler::seperate_command;
+use crate::command_handler::{explicit_command_list::COMMAND_LIST, handler::seperate_command};
 use crate::utils::guild_config::GuildConfig;
 
 use log::info;
@@ -27,6 +27,7 @@ impl EventHandler for DiscordEventHandler {
             ctx.cache.guilds().len()
         ))));
 
+        COMMAND_LIST.register_global(&ctx).await;
         tokio::join!(GuildConfig::boot(&ctx, &(self.database)));
     }
 

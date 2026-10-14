@@ -13,6 +13,7 @@ use crate::utils::scene_core::ImageSize::{
 use crate::GlobalGuildConfigs;
 
 use crate::utils::scene_core::{get_resized_image, merge_multiple_images, EmojiFilter, Layout};
+use crate::utils::webhook::send_as_user;
 use std::num::NonZeroU64;
 
 lazy_static! {
@@ -77,9 +78,11 @@ impl EmojiFilter for Message {
             return Err(());
         }
 
+        // `\r\n`까지 처리하고 각 줄 양끝 공백 trim. 빈 줄은 무시.
         let lines: Vec<&str> = self
             .content
-            .split('\n')
+            .lines()
+            .map(str::trim)
             .filter(|l| !l.is_empty())
             .collect();
         if lines.is_empty() {
@@ -91,7 +94,10 @@ impl EmojiFilter for Message {
         for line in &lines {
             match parse_emoji_line(line) {
                 Some(tokens) => parsed.push(tokens),
-                None => return Err(()),
+                None => {
+                    log::debug!("multi_emoji_filter: line not all-emoji: {:?}", line);
+                    return Err(());
+                }
             }
         }
 
@@ -102,16 +108,22 @@ impl EmojiFilter for Message {
 
         let counts: Vec<usize> = parsed.iter().map(|l| l.len()).collect();
         let total: usize = counts.iter().sum();
+        log::debug!(
+            "multi_emoji_filter: lines={}, counts={:?}",
+            parsed.len(),
+            counts
+        );
 
         let layout = if parsed.len() == 1 && (2..=4).contains(&counts[0]) {
             Layout::Horizontal
         } else if (2..=3).contains(&parsed.len()) && counts.iter().all(|&c| c == 1) {
             Layout::Vertical
-        } else if parsed.len() == 2 && counts == [2, 2] {
+        } else if parsed.len() == 2 && counts.iter().all(|&c| c == 2) {
             Layout::Grid2x2
-        } else if parsed.len() == 3 && counts == [3, 3, 3] {
+        } else if parsed.len() == 3 && counts.iter().all(|&c| c == 3) {
             Layout::Grid3x3
         } else {
+            log::debug!("multi_emoji_filter: no layout match");
             return Err(());
         };
 
@@ -242,7 +254,14 @@ async fn send_emoji_as_url(
     msg: &Message,
     img_url: &str,
     size: &str,
-) -> Result<Message, serenity::Error> {
+) -> Result<(), serenity::Error> {
+    if send_as_user(ctx, msg, Some(format!("{}{}", img_url, size)), vec![])
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
     let display_name = get_user_display_name(msg);
 
     if let Err(why) = msg
@@ -256,6 +275,7 @@ async fn send_emoji_as_url(
     msg.channel_id
         .say(&ctx.http, format!("{}{}", img_url, size))
         .await
+        .map(|_| ())
 }
 
 async fn send_emoji_as_file(
@@ -264,9 +284,7 @@ async fn send_emoji_as_file(
     is_png: bool,
     img_url: &str,
     size_config: &ImageSize,
-) -> Result<Message, serenity::Error> {
-    let display_name = get_user_display_name(msg);
-
+) -> Result<(), serenity::Error> {
     let attachment = if is_png {
         match get_resized_image(ctx, img_url, size_config).await {
             Some(att) => att,
@@ -279,6 +297,14 @@ async fn send_emoji_as_file(
         CreateAttachment::url(&ctx.http, img_url).await?
     };
 
+    if send_as_user(ctx, msg, None, vec![attachment.clone()])
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    let display_name = get_user_display_name(msg);
     msg.channel_id
         .send_files(
             &ctx.http,
@@ -286,17 +312,24 @@ async fn send_emoji_as_file(
             CreateMessage::new().content(format!("**{}** :", display_name)),
         )
         .await
+        .map(|_| ())
 }
 
 async fn send_merged_emoji(
     ctx: &Context,
     msg: &Message,
     merged_image: Vec<u8>,
-) -> Result<Message, serenity::Error> {
-    let display_name = get_user_display_name(msg);
-
+) -> Result<(), serenity::Error> {
     let attachment = CreateAttachment::bytes(merged_image, "merged_emoji.png");
 
+    if send_as_user(ctx, msg, None, vec![attachment.clone()])
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    let display_name = get_user_display_name(msg);
     msg.channel_id
         .send_files(
             &ctx.http,
@@ -304,6 +337,7 @@ async fn send_merged_emoji(
             CreateMessage::new().content(format!("**{}** :", display_name)),
         )
         .await
+        .map(|_| ())
 }
 
 fn get_user_display_name(msg: &Message) -> String {

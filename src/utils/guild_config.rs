@@ -1,4 +1,3 @@
-use crate::command_handler::explicit_command_list::COMMAND_LIST;
 use crate::{utils::scene_core::ImageSize, GlobalGuildConfigs};
 use log::{error, info};
 
@@ -87,8 +86,6 @@ impl GuildConfig {
         for guild in ctx.cache.guilds() {
             let sync_collections = collections.clone();
             let sync_guilds_config = counter_lock.clone();
-            // 모든 명령어를 길드별로 자동 등록 (/update 폐기됨).
-            COMMAND_LIST.register_commands(guild, ctx).await;
 
             tokio::spawn(async move {
                 let Some(key) = NonZeroU64::new(guild.get()) else {
